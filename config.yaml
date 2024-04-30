@@ -1,0 +1,9 @@
+path: /media/D-Drive/M Tech AI/Thesis/Projects/Sattellite Segmentation Nepal/output/512x512
+train: images/train
+val: images/val
+test: images/test
+
+names:
+  0: background
+  1: building
+  2: woodland

@@ -1,0 +1,15 @@
+.idea/
+.vscode/
+datasets/
+output/
+runs/
+
+.ipynb_checkpoints/
+
+*.pyc
+__pycache__/
+venv/
+
+*.hdf5
+
+*.pt
