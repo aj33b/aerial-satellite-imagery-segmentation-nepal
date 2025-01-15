@@ -1,8 +1,11 @@
+import logging
 import os
+from logging.handlers import TimedRotatingFileHandler
 
 import matplotlib.pyplot as plt
 import numpy as np
 import rasterio
+from osgeo import gdal, ogr
 from rasterio.features import rasterize
 from shapely import Polygon
 from shapely.ops import unary_union
@@ -11,6 +14,91 @@ from tqdm.notebook import tqdm_notebook as tqdm
 
 from generator import NepalDataset, NepalDataGenerator
 
+# Setup logger
+
+class DynamicTqdmHandler(logging.StreamHandler):
+    """
+    Custom logging handler that dynamically switches between `tqdm.write` and standard `StreamHandler`
+    based on whether a `tqdm` progress bar is currently active.
+    """
+
+    def emit(self, record):
+        try:
+            msg = self.format(record)
+            # If tqdm is active, use tqdm.write to log below the progress bar
+            if tqdm.get_lock().locks:  # Check if a tqdm instance is active
+                tqdm.write(msg)
+            else:
+                # If tqdm is not active, fallback to standard `StreamHandler` behavior
+                super().emit(record)
+        except Exception:
+            self.handleError(record)
+
+class ColorFormatter(logging.Formatter):
+    COLORS = {
+        'DEBUG': '\033[94m',  # Blue
+        'INFO': '\033[92m',  # Green
+        'WARNING': '\033[93m',  # Yellow
+        'ERROR': '\033[91m',  # Red
+        'CRITICAL': '\033[1;91m'  # Bold Red
+    }
+    RESET = '\033[0m'
+
+    def format(self, record):
+        color = self.COLORS.get(record.levelname, self.RESET)
+        formatted_message = super().format(record)
+        return f"{color}{formatted_message}{self.RESET}"
+
+def setup_logger(logger_name='Satellite Segmentation Nepal',
+                 log_level=logging.DEBUG,
+                 log_dir='./logs'):
+    """
+    Sets up a logger with both console and file handlers. The console handler
+    dynamically uses tqdm logging when active.
+
+    Parameters:
+        logger_name (str): The name of the logger.
+        log_level (int): The logging level (e.g., logging.DEBUG, logging.INFO).
+        log_dir (str): Directory where log files will be saved.
+
+    Returns:
+        logging.Logger: Configured logger instance.
+    """
+    logger = logging.getLogger(logger_name)
+    logger.setLevel(log_level)
+
+    # Avoid duplicate handlers in case the logger is already initialized
+    if logger.handlers:
+        return logger
+
+    # Create the logs directory if it doesn't exist
+    os.makedirs(log_dir, exist_ok=True)
+
+    # Log format
+    LOG_FORMAT = (
+        "%(asctime)s - %(name)s - %(levelname)s - %(message)s "
+        "[in %(pathname)s:%(lineno)d]"
+    )
+
+    # Console handler with dynamic tqdm support
+    stream_handler = DynamicTqdmHandler()
+    stream_handler.setLevel(log_level)
+    stream_handler.setFormatter(ColorFormatter(LOG_FORMAT))
+    logger.addHandler(stream_handler)
+
+    # Timed rotating file handler (rotates logs daily at midnight)
+    file_handler = TimedRotatingFileHandler(
+        os.path.join(log_dir, 'log.txt'),
+        when='midnight',
+        interval=1,
+        backupCount=7,  # Keep logs for the last 7 days
+        encoding='utf-8'
+    )
+    file_handler.setLevel(log_level)
+    file_handler.setFormatter(logging.Formatter(LOG_FORMAT))
+    logger.addHandler(file_handler)
+
+    return logger
 
 def poly_from_utm(polygon, transform):
     poly_pts = []
@@ -101,47 +189,128 @@ def create_patches(image_path, mask_path, output_dir, patch_size, stride, bounda
 """
 
 
-def create_patches(image_path, mask_path, output_dir, patch_size, stride):
+def create_patches(image_path, mask_path, output_dir, patch_size, stride, logger):
+    try:
+        # Open satellite image
+        with rasterio.open(image_path, "r") as src:
+            image = src.read()
+            image_meta = src.meta
+            image_crs = src.crs
+
+        # Open shapefile mask
+        with rasterio.open(mask_path, "r") as src:
+            mask_data = src.read()
+            mask_meta = src.meta
+            mask_crs = src.crs
+
+        no_of_patches_saved = 0
+
+        logger.info(f"Generating patches for image: {image_path} and mask: {mask_path}")
+
+        # Extract base names for image and mask
+        image_base_name = os.path.splitext(os.path.basename(image_path))[0]
+        mask_base_name = os.path.splitext(os.path.basename(mask_path))[0]
+
+        # Iterate over patches
+        for i, (x, y) in enumerate(generate_patch_coordinates(image.shape[1], image.shape[2], patch_size, stride)):
+            image_patch_name = f"{image_base_name}_patch_{i}.jpg"
+            mask_patch_name = f"{mask_base_name}_patch_{i}_mask.jpg"
+
+            # Check if the patch size is smaller than the remaining image size
+            if y + patch_size > image.shape[1] or x + patch_size > image.shape[2]:
+                continue
+
+            mask_patch = mask_data[0, y:y + patch_size, x:x + patch_size]
+
+            # Calculate the number of unique non-zero values in the patch
+            unique_values = np.unique(mask_patch)
+            num_intersecting_masks = len(np.setdiff1d(unique_values, [0]))
+            logger.info(f"Number of intersecting masks for {mask_patch_name}: {num_intersecting_masks}")
+            # Skip patch if no intersection with mask geometries
+            if np.count_nonzero(mask_patch) == 0:
+                continue
+
+            # Get patch from image
+            image_patch = image[:, y:y + patch_size, x:x + patch_size]
+
+            # Generate file names using base names
+            patch_path = os.path.join(output_dir, "images", image_patch_name)
+            patch_mask_path = os.path.join(output_dir, "masks", mask_patch_name)
+
+            bin_image_meta = image_meta.copy()
+            bin_image_meta.update({'count': image_patch.shape[0]})
+            bin_image_meta.update({'height': image_patch.shape[1]})
+            bin_image_meta.update({'width': image_patch.shape[2]})
+
+            save_image_patch(image_patch, patch_path, bin_image_meta)
+            logger.info(f"Image patch saved at: {patch_path}")
+
+            bin_mask_meta = mask_meta.copy()
+            bin_mask_meta.update({'count': 1})
+            bin_mask_meta.update({'height': mask_patch.shape[0]})
+            bin_mask_meta.update({'width': mask_patch.shape[1]})
+
+            save_mask_patch(mask_patch, patch_mask_path, bin_mask_meta)
+            logger.info(f"Mask patch saved at: {patch_mask_path}")
+            no_of_patches_saved += 1
+
+        logger.info(f"Total number of image and mask patches saved: {no_of_patches_saved}")
+
+    except Exception as e:
+        logger.error(f"An error occurred while generating patches: {e}")
+
+
+def create_patches_one_hot(image_path, mask_path, output_dir, patch_size, stride, logger, min_mask_coverage=0.3):
     # Open satellite image
     with rasterio.open(image_path, "r") as src:
         image = src.read()
         image_meta = src.meta
         image_crs = src.crs
 
-    # Open shapefile mask
+    # Open rasterized mask
     with rasterio.open(mask_path, "r") as src:
         mask_data = src.read()
         mask_meta = src.meta
         mask_crs = src.crs
 
     no_of_patches_saved = 0
+    image_base_name = os.path.splitext(os.path.basename(image_path))[0]
+    mask_base_name = os.path.splitext(os.path.basename(mask_path))[0]
 
-    tqdm.write("Generating patches...")
+    logger.info(f"Generating patches for image: {image_path} and mask: {mask_path}")
 
     # Iterate over patches
-    for i, (x, y) in tqdm(enumerate(generate_patch_coordinates(image.shape[1], image.shape[2], patch_size, stride))):
+    for i, (x, y) in enumerate(generate_patch_coordinates(image.shape[1], image.shape[2], patch_size, stride)):
+        image_patch_name = f"{image_base_name}_patch_{i}.jpg"
+        mask_patch_name = f"{mask_base_name}_patch_{i}_mask.jpg"
 
-        # Check if the patch size is smaller than the remaining image size
+        # Check if the patch size is smaller than the remaining image size and skip if not
         if y + patch_size > image.shape[1] or x + patch_size > image.shape[2]:
             continue
 
-        mask_patch = mask_data[0, y:y + patch_size, x:x + patch_size]
+        mask_patch = mask_data[:, y:y + patch_size, x: x + patch_size]
+        logger.debug(f"Processing {image_base_name} patch {i} at coordinates ({x}, {y}) with size {mask_patch.shape}")
 
-        # Calculate the number of unique non-zero values in the patch
-        num_intersecting_masks = len(np.unique(mask_patch)) - 1 if 0 in np.unique(mask_patch) else len(
-            np.unique(mask_patch))
-        tqdm.write(f"\nNumber of intersecting masks for patch {i}: {num_intersecting_masks}")
+        # Calculate mask coverage
+        mask_patch_flat = mask_patch.flatten()
+        non_zero_pixels = np.count_nonzero(mask_patch_flat)
+        mask_coverage = non_zero_pixels / mask_patch_flat.size
 
-        # Skip patch if no intersection with mask geometries
-        if np.count_nonzero(mask_patch) == 0:
+        # Check if mask coverage is below threshold and skip if not
+        if mask_coverage < min_mask_coverage:
+            logger.warning(f"Skipping {image_base_name} patch {i} - Mask coverage below threshold: {mask_coverage:.2f}")
             continue
 
+        one_hot_mask = np.zeros((3, patch_size, patch_size))
+        for class_value in [0, 1, 2]:  # Assuming classes 1 and 2
+            class_indices = np.where(mask_patch == class_value, class_value + 1, 0)
+            one_hot_mask[class_value, :, :] = class_indices
+
         # Get patch from image
+        # Get patch from image (only if mask coverage is sufficient)
         image_patch = image[:, y:y + patch_size, x:x + patch_size]
 
         # Save patch and patch mask
-        image_patch_name = f"patch_{i}.jpg"
-        mask_patch_name = f"patch_{i}_mask.jpg"
         patch_path = os.path.join(output_dir, "images", image_patch_name)
         patch_mask_path = os.path.join(output_dir, "masks", mask_patch_name)
 
@@ -151,19 +320,108 @@ def create_patches(image_path, mask_path, output_dir, patch_size, stride):
         bin_image_meta.update({'width': image_patch.shape[2]})
 
         save_image_patch(image_patch, patch_path, bin_image_meta)
-        tqdm.write(f"Image patch saved at: {output_dir}/images/{image_patch_name}")
+        logger.info(f"Image patch saved at: {output_dir}/images/{image_patch_name}")
 
         bin_mask_meta = mask_meta.copy()
-        bin_mask_meta.update({'count': 1})
-        bin_mask_meta.update({'height': mask_patch.shape[0]})
-        bin_mask_meta.update({'width': mask_patch.shape[1]})
+        bin_mask_meta.update({'count': one_hot_mask.shape[0]})
+        bin_mask_meta.update({'height': one_hot_mask.shape[1]})
+        bin_mask_meta.update({'width': one_hot_mask.shape[2]})
 
-        save_mask_patch(mask_patch, patch_mask_path, bin_mask_meta)
+        save_mask_patch(one_hot_mask, patch_mask_path, bin_mask_meta)
 
-        tqdm.write(f"Mask patch saved at: {output_dir}/images/{image_patch_name}")
+        logger.info(f"Mask patch saved at: {output_dir}/images/{image_patch_name}")
         no_of_patches_saved += 1
-    tqdm.write(f"\nTotal number image and mask patches saved: {str(no_of_patches_saved)}")
+    logger.info(f"\nTotal number of image and mask patches saved: {str(no_of_patches_saved)}")
 
+def create_patches_categorical(image_path, mask_path, output_dir, patch_size, stride, logger, min_mask_coverage=0.3):
+    # Open satellite image
+    with rasterio.open(image_path, "r") as src:
+        image = src.read()
+        image_meta = src.meta
+        image_crs = src.crs
+
+    # Open rasterized mask
+    with rasterio.open(mask_path, "r") as src:
+        mask_data = src.read(1)  # Read the first band only (assumes single-band mask)
+        mask_meta = src.meta
+        mask_crs = src.crs
+
+    # Initialize counts
+    processed_patches = 0
+    no_of_patches_saved = 0
+
+    # Base filenames for tracking
+    image_base_name = os.path.splitext(os.path.basename(image_path))[0]
+    mask_base_name = os.path.splitext(os.path.basename(mask_path))[0]
+
+    # Calculate total potential patches
+    total_patches = ((image.shape[1] - patch_size) // stride + 1) * ((image.shape[2] - patch_size) // stride + 1)
+
+    # logger.info(
+    #     f"Generating patches for image '{os.path.basename(image_path)}' and mask '{os.path.basename(mask_path)}'")
+    # logger.info(f"Total patches to process: {total_patches}")
+
+    # Initialize tqdm progress bar for the current image
+    with tqdm(total=total_patches, desc=f"Patches for {image_base_name}", unit="patch", leave=False) as pbar:
+        # Generate patches
+        for i, (x, y) in enumerate(generate_patch_coordinates(image.shape[1], image.shape[2], patch_size, stride)):
+            processed_patches += 1  # Increment processed patch counter
+            image_patch_name = f"{image_base_name}_patch_{i}.jpg"
+            mask_patch_name = f"{mask_base_name}_patch_{i}_mask.jpg"
+
+            # Skip invalid patches (outside bounds)
+            if y + patch_size > image.shape[1] or x + patch_size > image.shape[2]:
+                pbar.update(1)
+                continue
+
+            # Extract mask patch
+            mask_patch = mask_data[y:y + patch_size, x:x + patch_size]
+            # logger.debug(f"Processing patch {i} at coordinates ({x}, {y}) with size {mask_patch.shape}")
+
+            # Calculate mask coverage
+            mask_patch_flat = mask_patch.flatten()
+            non_zero_pixels = np.count_nonzero(mask_patch_flat > 0)  # Count non-background pixels
+            mask_coverage = non_zero_pixels / mask_patch_flat.size
+
+            # Skip patches with insufficient mask coverage
+            if mask_coverage < min_mask_coverage:
+                # logger.warning(f"Skipping patch {i}: Mask coverage too low ({mask_coverage:.2f})")
+                pbar.update(1)
+                continue
+
+            # Create class label mask
+            categorical_mask = mask_patch  # Class label mask directly uses values from `mask_patch`
+
+            # Get patch from image (only if mask coverage is sufficient)
+            image_patch = image[:, y:y + patch_size, x:x + patch_size]
+
+            # Create output paths
+            patch_path = os.path.join(output_dir, "images", image_patch_name)
+            patch_mask_path = os.path.join(output_dir, "masks", mask_patch_name)
+
+            # Save image patch
+            bin_image_meta = image_meta.copy()
+            bin_image_meta.update({'count': image_patch.shape[0]})  # Number of channels in the image
+            bin_image_meta.update({'height': image_patch.shape[1]})
+            bin_image_meta.update({'width': image_patch.shape[2]})
+            save_image_patch(image_patch, patch_path, bin_image_meta)
+            # logger.info(f"Image patch saved at: {patch_path}")
+
+            # Save class label mask
+            bin_mask_meta = mask_meta.copy()
+            bin_mask_meta.update({'count': 1})  # Single layer for class label mask
+            bin_mask_meta.update({'height': categorical_mask.shape[0]})
+            bin_mask_meta.update({'width': categorical_mask.shape[1]})
+            save_mask_patch(categorical_mask[np.newaxis, :, :], patch_mask_path, bin_mask_meta)
+            # logger.info(f"Mask patch saved at: {patch_mask_path}")
+
+            no_of_patches_saved += 1
+            # Update inner tqdm progress bar
+            pbar.update(1)
+
+    # Final logging per image-mask pair
+    logger.info(
+        f"Completed: '{image_base_name}' with {processed_patches} patches processed, {no_of_patches_saved} patches saved")
 
 def visualize_image_mask(image_array, mask_array):
     # Check if the image is 5-channel
@@ -283,7 +541,7 @@ def rasterize_masks(intersecting_masks, patch_geometry, image_width, image_heigh
     return mask
 """
 
-
+"""
 def rasterize_masks(image_meta, intersecting_masks, image_height, image_width):
     poly_shp = []
     im_size = (image_height, image_width)
@@ -301,6 +559,63 @@ def rasterize_masks(image_meta, intersecting_masks, image_height, image_width):
     mask = mask.astype("uint16")
 
     return mask
+"""
+
+def rasterize_masks(image_file_path, mask_shape_file_path,rasterized_dir,logger):
+    # GDAL format and data type
+    gdalformat = 'GTiff'
+    datatype = gdal.GDT_Float32
+    try:
+        # Get the mission name from the image file path
+        rasterized_file_name = os.path.basename(mask_shape_file_path).replace('.shp', '')
+
+        # Define the output rasterized file path
+        rasterized_file_path = os.path.join(rasterized_dir, f'{rasterized_file_name}_rasterized.tif')
+
+        # Get projection info from reference image
+        Image = gdal.Open(image_file_path, gdal.GA_ReadOnly)
+        if Image is None:
+            logger.error(f"Failed to open image file: {image_file_path}")
+            return
+
+        # Open Shapefile
+        Shapefile = ogr.Open(mask_shape_file_path)
+        if Shapefile is None:
+            logger.error(f"Failed to open shapefile: {mask_shape_file_path}")
+            return
+        Shapefile_layer = Shapefile.GetLayer()
+
+        # Rasterize
+        logger.info(f"Rasterizing shapefile for {rasterized_file_name}")
+
+        Output = gdal.GetDriverByName(gdalformat).Create(
+            rasterized_file_path, Image.RasterXSize, Image.RasterYSize, 1,
+            datatype, options=['COMPRESS=DEFLATE']
+        )
+        Output.SetProjection(Image.GetProjectionRef())
+        Output.SetGeoTransform(Image.GetGeoTransform())
+
+        # Write data to band 1
+        Band = Output.GetRasterBand(1)
+        Band.SetNoDataValue(0)
+
+        gdal.RasterizeLayer(Output, [1], Shapefile_layer, options=['ATTRIBUTE=Class_id'])
+
+        logger.info(f"Rasterization of shapefile for {rasterized_file_name} completed. Output saved to {rasterized_file_path}")
+
+    except Exception as e:
+        logger.exception(f"An error occurred while processing {rasterized_file_name}: {e}")
+
+    finally:
+        # Ensure datasets are closed
+        if Band is not None:
+            Band = None
+        if Output is not None:
+            Output = None
+        if Image is not None:
+            Image = None
+        if Shapefile is not None:
+            Shapefile = None
 
 
 # def rasterize_masks(image_meta, intersecting_masks, image_height, image_width):
@@ -314,7 +629,7 @@ def rasterize_masks(image_meta, intersecting_masks, image_height, image_width):
 #
 #     return mask
 
-
+"""
 def save_image_patch(patch, patch_path, image_meta):
     # Create directories if they don't exist
     os.makedirs(os.path.dirname(patch_path), exist_ok=True)
@@ -331,7 +646,26 @@ def save_mask_patch(patch, patch_path, mask_meta):
     # Save patch as TIFF image
     with rasterio.open(patch_path, 'w', **mask_meta) as dst:
         dst.write(patch.astype(np.uint8)[np.newaxis, ...])
+"""
 
+def save_image_patch(patch, patch_path, image_meta):
+    # Create directories if they don't exist
+    os.makedirs(os.path.dirname(patch_path), exist_ok=True)
+
+    # Save patch as TIFF image
+    with rasterio.open(patch_path, 'w', **image_meta) as dst:
+        dst.write(patch)
+
+
+def save_mask_patch(patch, patch_path, mask_meta):
+    # Create directories if they don't exist
+    os.makedirs(os.path.dirname(patch_path), exist_ok=True)
+    #  (after coorection)
+
+
+    # Save patch as TIFF image
+    with rasterio.open(patch_path, 'w', **mask_meta) as dst:
+        dst.write(patch)
 
 def prepare_dataset():
     image_path = './datasets/planet_dataset/composite.tif'

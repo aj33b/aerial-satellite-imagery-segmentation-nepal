@@ -13,3 +13,7 @@ venv/
 *.hdf5
 
 *.pt
+
+models/
+ayush_project/
+logs/

@@ -1,4 +1,4 @@
-path: /media/D-Drive/M Tech AI/Thesis/Projects/Sattellite Segmentation Nepal/output/512x512
+path: /Users/ajeebrimal/Documents/Masters Thesis/aerial-satellite-imagery-segmentation-nepal/output/512x512
 train: images/train
 val: images/val
 test: images/test
