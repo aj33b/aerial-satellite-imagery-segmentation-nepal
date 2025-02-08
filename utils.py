@@ -5,6 +5,7 @@ from logging.handlers import TimedRotatingFileHandler
 import matplotlib.pyplot as plt
 import numpy as np
 import rasterio
+import torch
 from osgeo import gdal, ogr
 from rasterio.features import rasterize
 from shapely import Polygon
@@ -367,7 +368,7 @@ def create_patches_categorical(image_path, mask_path, output_dir, patch_size, st
         for i, (x, y) in enumerate(generate_patch_coordinates(image.shape[1], image.shape[2], patch_size, stride)):
             processed_patches += 1  # Increment processed patch counter
             image_patch_name = f"{image_base_name}_patch_{i}.jpg"
-            mask_patch_name = f"{mask_base_name}_patch_{i}_mask.jpg"
+            mask_patch_name = f"{image_base_name}_patch_{i}_mask.jpg"
 
             # Skip invalid patches (outside bounds)
             if y + patch_size > image.shape[1] or x + patch_size > image.shape[2]:
@@ -701,3 +702,34 @@ def test_data_generator():
         image = images[i].permute(1, 2, 0).numpy()  # Access individual image and convert to numpy array
         mask = masks[i].squeeze().numpy()  # Access individual mask and convert to numpy array
         visualize(image, mask)
+
+def calculate_metrics(preds, targets, num_classes):
+    """Calculate IoU, F1-score, and accuracy."""
+    metrics = {"IoU": [], "F1-Score": [], "Pixel Accuracy": 0.0}
+
+    # Convert predictions to class labels
+    preds = torch.argmax(preds, dim=1)
+
+    intersection = torch.zeros(num_classes, device=preds.device)
+    union = torch.zeros(num_classes, device=preds.device)
+    TP = torch.zeros(num_classes, device=preds.device)  # True Positives
+    FP_FN_error = torch.zeros(num_classes, device=preds.device)  # False Positives + False Negatives
+
+    for c in range(num_classes):
+        pred_c = preds == c
+        target_c = targets == c
+
+        intersection[c] = torch.sum((pred_c & target_c).float())  # Intersection
+        union[c] = torch.sum((pred_c | target_c).float())  # Union
+        TP[c] = intersection[c]
+        FP_FN_error[c] = torch.sum(pred_c.float()) + torch.sum(target_c.float()) - TP[c]
+
+    # IoU per class
+    metrics["IoU"] = (intersection / (union + 1e-7)).cpu().numpy()
+    # F1-Score per class
+    metrics["F1-Score"] = (2 * TP / (FP_FN_error + 2 * TP + 1e-7)).cpu().numpy()
+    # Pixel Accuracy
+    metrics["Pixel Accuracy"] = (torch.sum(intersection) / torch.sum(union)).item()
+
+    return metrics
+

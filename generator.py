@@ -7,30 +7,47 @@ from torch.utils.data import Dataset
 
 
 class NepalDataset(Dataset):
-    def __init__(self, data_path, transform=None):
-        self.data_path = data_path
+    def __init__(self, data_path, split="train", transform=None):
+        """
+        NepalDataset constructor updated to handle split dataset directories.
+
+        Args:
+            data_path (str): Base path to the dataset.
+            split (str): The dataset split to use - "train", "val", or "test".
+            transform (callable, optional): Transformations to apply to images and masks.
+        """
+        self.split_path = os.path.join(data_path, split)  # Path for split (e.g., train, val, test)
+        self.images_dir = os.path.join(self.split_path, "images")  # Subdirectory for images
+        self.masks_dir = os.path.join(self.split_path, "masks")  # Subdirectory for masks
         self.transform = transform
-        self.image_list = os.listdir(os.path.join(data_path, "images"))
-        self.mask_list = [image_name.replace(".tiff", "_mask.tiff") for image_name in self.image_list]
+
+        # Load all image filenames and construct corresponding mask filenames
+        self.image_list = os.listdir(self.images_dir)
+        self.mask_list = []
+        for image_name in self.image_list:
+            basename, ext = os.path.splitext(image_name)
+            mask_name = f"{basename}_mask{ext}"  # Append '_mask' to the image basename
+            self.mask_list.append(mask_name)
 
     def __len__(self):
         return len(self.image_list)
 
     def __getitem__(self, idx):
-        img_name = os.path.join(self.data_path, "images", self.image_list[idx])
+        # Get the image and corresponding mask paths
+        img_name = os.path.join(self.images_dir, self.image_list[idx])
+        basename, ext = os.path.splitext(self.image_list[idx])
         mask_name = os.path.join(
-            self.data_path,
-            "masks",
-            self.image_list[idx].replace(".tiff", "_mask.tiff")
+            self.masks_dir,
+            f"{basename}_mask{ext}"  # Use the new mask naming convention
         )
 
         # Load image and mask using tifffile
         img = tiff.imread(img_name)
         mask = tiff.imread(mask_name)
 
-        # Convert image to RGB if it has more than 3 channels
-        # if img.shape[-1] > 3:
-        #     img = img[:, :, :3]
+        # Fix input channels to ensure it is RGB
+        if len(img.shape) == 3 and img.shape[-1] == 4:  # Drop the extra alpha channel if present
+            img = img[:, :, :3]
 
         # Convert image and mask to uint8 if needed
         if img.dtype != np.uint8:
@@ -38,7 +55,7 @@ class NepalDataset(Dataset):
         if mask.dtype != np.uint8:
             mask = (mask * 255).astype(np.uint8)
 
-        # Apply transforms
+        # Apply transforms (if provided)
         if self.transform is not None:
             img = self.transform(img)
             mask = self.transform(mask)
@@ -46,8 +63,18 @@ class NepalDataset(Dataset):
         return img, mask
 
     def get_mask_path(self, idx):
-        mask_filename = self.mask_list[idx]
-        mask_path = os.path.join(self.data_path, "masks", mask_filename)
+        """
+        Get the mask path for the corresponding image by index.
+
+        Args:
+            idx (int): Index of the image in the dataset.
+
+        Returns:
+            str: Full path to the corresponding mask file.
+        """
+        basename, ext = os.path.splitext(self.image_list[idx])
+        mask_filename = f"{basename}_mask{ext}"  # Append '_mask' to the basename
+        mask_path = os.path.join(self.masks_dir, mask_filename)
         return mask_path
 
 
@@ -82,6 +109,10 @@ class NepalDataGenerator:
         for idx in batch_indices:
             image, mask = self.dataset[idx]
             batch_images.append(image)
+
+            # Ensure the mask is squeezed to remove channel dimensions
+            if len(mask.shape) == 3:  # Handle (H, W, 1) or (1, H, W)
+                mask = mask.squeeze()  # This ensures masks are always (H, W)
             batch_masks.append(mask)
 
         self.current_idx += 1
