@@ -11,7 +11,7 @@ This project is part of my Master of Technology in Artificial Intelligence thesi
 To set up the development environment, you need to install the required packages and create an environment using conda. You can do this by running the following command:
 
 ```bash
-conda create --name <env> --file requirements.txt
+conda create --name <env> --file requirements_conda.txt
 ```
 
 Now you can activate the environment using the following command:
