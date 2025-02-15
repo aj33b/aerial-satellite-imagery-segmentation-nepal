@@ -11,7 +11,7 @@ from rasterio.features import rasterize
 from shapely import Polygon
 from shapely.ops import unary_union
 from torchvision.transforms import transforms
-from tqdm.notebook import tqdm_notebook as tqdm
+from tqdm import tqdm
 
 from generator import NepalDataset, NepalDataGenerator
 
