@@ -8,14 +8,6 @@ from torch.utils.data import Dataset
 
 class NepalDataset(Dataset):
     def __init__(self, data_path, split="train", transform=None):
-        """
-        NepalDataset constructor updated to handle split dataset directories.
-
-        Args:
-            data_path (str): Base path to the dataset.
-            split (str): The dataset split to use - "train", "val", or "test".
-            transform (callable, optional): Transformations to apply to images and masks.
-        """
         self.split_path = os.path.join(data_path, split)  # Path for split (e.g., train, val, test)
         self.images_dir = os.path.join(self.split_path, "images")  # Subdirectory for images
         self.masks_dir = os.path.join(self.split_path, "masks")  # Subdirectory for masks
@@ -76,7 +68,6 @@ class NepalDataset(Dataset):
         mask_filename = f"{basename}_mask{ext}"  # Append '_mask' to the basename
         mask_path = os.path.join(self.masks_dir, mask_filename)
         return mask_path
-
 
 class NepalDataGenerator:
     def __init__(self, dataset, batch_size=16, shuffle=True):

@@ -3,8 +3,11 @@
 datasets/
 output/
 runs/
+old/
+logs/
+mlruns/
 
-.ipynb_checkpoints/
+sources/.ipynb_checkpoints/
 
 *.pyc
 __pycache__/
@@ -13,8 +16,3 @@ venv/
 *.hdf5
 
 *.pt
-
-models/
-ayush_project/
-logs/
-mlruns/

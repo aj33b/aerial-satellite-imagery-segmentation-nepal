@@ -1,5 +1,5 @@
-from train import train_model_with_pan
-from utils import prepare_dataset, test_data_generator
+from sources.helpers.train import train_model_with_pan
+from sources.helpers.utils import prepare_dataset, test_data_generator
 
 
 def main():
