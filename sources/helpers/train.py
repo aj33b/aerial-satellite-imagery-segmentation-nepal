@@ -2,6 +2,7 @@ import os
 import torch.nn as nn
 import mlflow
 import torch
+from losses import DiceLoss
 from torchvision.models.segmentation import deeplabv3_mobilenet_v3_large,DeepLabV3_MobileNet_V3_Large_Weights,deeplabv3_resnet50,DeepLabV3_ResNet50_Weights
 import torch.optim as optim
 
@@ -38,7 +39,13 @@ class TrainingHelper:
 
         match loss_function:
             case "cross_entropy":
+                # SparseCategoricalCrossEntropyLoss
+                # Jaccard Loss
+                # Dice Loss
+                # CEDiceLoss
                 self.criterion = nn.CrossEntropyLoss()
+            case "dice_loss":
+                self.criterion = DiceLoss()
             case _:
                 raise ValueError(f"Loss function {loss_function} not supported!")
 
